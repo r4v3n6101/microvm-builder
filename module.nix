@@ -58,7 +58,7 @@ let
     ${lib.getExe pkgs.gvproxy} \
       --ssh-port ${toString cfg.port} \
       --listen-vfkit "unixgram://${vfkit-sock}" \
-    >/tmp/${cfg.name}-gvproxy.log 2>/tmp/${cfg.name}-gvproxy.err &
+    >/tmp/${cfg.name}-gvproxy.log 2>&1 &
     GVPROXY_PID=$!
     trap 'kill $GVPROXY_PID' EXIT
 
@@ -79,8 +79,6 @@ in
           {
             hostName = cfg.name;
             protocol = "ssh-ng";
-            sshUser = "builder";
-            sshKey = ssh-key;
             systems = [
               "aarch64-linux"
               "x86_64-linux"
@@ -99,21 +97,9 @@ in
         settings.builders-use-substitutes = lib.mkDefault true;
       };
 
-      system.activationScripts.extraActivation.text = lib.mkAfter ''
-        mkdir -p ${cfg.workingDirectory}
-
-        cp ${./keys/id_ecdsa} ${ssh-key}
-        chmod 600 ${ssh-key}
-
-        if [ ! -f "${nix-store-overlay}" ]; then 
-          truncate -s ${toString cfg.diskSize}M ${nix-store-overlay}
-          chmod 0777 ${nix-store-overlay}
-        fi
-      '';
-
       environment.etc."ssh/ssh_config.d/098-${cfg.name}.conf".text = ''
         Host ${cfg.name}
-          User builder
+          User root
           Hostname localhost
           Port ${toString cfg.port}
           IdentityFile ${ssh-key}
@@ -129,6 +115,18 @@ in
           WorkingDirectory = cfg.workingDirectory;
         };
       };
+
+      system.activationScripts.extraActivation.text = lib.mkAfter ''
+        mkdir -p ${cfg.workingDirectory}
+
+        cp ${./keys/id_ecdsa} ${ssh-key}
+        chmod 600 ${ssh-key}
+
+        if [ ! -f "${nix-store-overlay}" ]; then
+          truncate -s ${toString cfg.diskSize}M ${nix-store-overlay}
+          chmod 0777 ${nix-store-overlay}
+        fi
+      '';
     })
 
     (lib.mkIf (!cfg.enable) {

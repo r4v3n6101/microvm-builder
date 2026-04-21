@@ -1,38 +1,22 @@
-{ config, ... }:
-let
-  cfg = config.services.microvm-builder;
-in
+{ ... }:
 {
-  imports = [
-    ./options.nix
+  nix.settings.experimental-features = [
+    "nix-command"
+    "flakes"
   ];
 
-  nix.settings = {
-    trusted-users = [ "@wheel" ];
-    experimental-features = [
-      "nix-command"
-      "flakes"
-    ];
-  };
-
-  networking = {
-    hostName = cfg.name;
-    useDHCP = true;
-  };
+  networking.useDHCP = true;
 
   services.openssh = {
     enable = true;
     settings = {
-      PermitRootLogin = "no";
+      PermitRootLogin = "yes";
       PasswordAuthentication = false;
     };
   };
 
-  services.getty.autologinUser = "builder";
-
-  users.users.builder = {
-    isNormalUser = true;
-    extraGroups = [ "wheel" ];
+  users.users.root = {
+    isSystemUser = true;
     openssh.authorizedKeys.keyFiles = [
       ./keys/id_ecdsa.pub
     ];
