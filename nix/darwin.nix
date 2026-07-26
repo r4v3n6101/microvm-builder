@@ -18,6 +18,55 @@
 
       vfkitSocket = "${cfg.runtime.directory}/vfkit.sock";
 
+      ensureSshKey = pkgs.writeShellScriptBin "microvm-builder-ensure-ssh-key" ''
+        set -euo pipefail
+
+        install -d \
+          -m 0700 \
+          -o ${lib.escapeShellArg config.system.primaryUser} \
+          -g staff \
+          ${lib.escapeShellArg cfg.runtime.directory}
+
+        if [[ ! -s ${lib.escapeShellArg cfg.ssh.privateKey} ]]; then
+          ${lib.getExe' pkgs.openssh "ssh-keygen"} \
+            -t ed25519 \
+            -N "" \
+            -f ${lib.escapeShellArg cfg.ssh.privateKey} \
+            -C microvm-builder
+
+          chown ${lib.escapeShellArg config.system.primaryUser}:staff \
+            ${lib.escapeShellArg cfg.ssh.privateKey} \
+            ${lib.escapeShellArg cfg.ssh.privateKey}.pub
+        fi
+
+        if [[ ! -s ${lib.escapeShellArg cfg.ssh.publicKey} ]]; then
+          ${lib.getExe' pkgs.openssh "ssh-keygen"} \
+            -y \
+            -f ${lib.escapeShellArg cfg.ssh.privateKey} \
+            > ${lib.escapeShellArg cfg.ssh.publicKey}
+
+          chown ${lib.escapeShellArg config.system.primaryUser}:staff \
+            ${lib.escapeShellArg cfg.ssh.publicKey}
+          chmod 0644 ${lib.escapeShellArg cfg.ssh.publicKey}
+        fi
+      '';
+
+      daemonWrapper = pkgs.writeShellScriptBin "microvm-builder-daemon" ''
+        set -euo pipefail
+
+        ${lib.getExe ensureSshKey}
+
+        exec ${microvmBuilder} daemon \
+          --runtime-dir ${lib.escapeShellArg cfg.runtime.directory} \
+          --gvproxy ${lib.escapeShellArg gvproxy} \
+          --vfkit ${lib.escapeShellArg vfkit} \
+          --runner ${lib.escapeShellArg microvmRunner} \
+          --ssh-port ${toString cfg.ssh.port} \
+          --idle-timeout ${toString cfg.idleTimeout} \
+          --start-timeout ${toString cfg.startTimeout} \
+          --stop-timeout ${toString cfg.stopTimeout}
+      '';
+
       microvmModule = {
         imports = [
           inputs.microvm.nixosModules.microvm
@@ -73,14 +122,34 @@
             };
           };
 
-          system.activationScripts.microvmBuilderSshKey.text = ''
-            key="$(
-              ${lib.getExe' pkgs.gnused "sed"} \
-                -n 's/.* microvm.builder-ssh-key=\([^ ]*\).*/\1/p' \
-                /proc/cmdline
-            )"
+          systemd.services.microvm-builder-ssh-key = {
+            description = "Install microvm-builder SSH key";
+            requiredBy = [ "sshd.service" ];
+            before = [ "sshd.service" ];
 
-            if [ -n "$key" ]; then
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+            };
+
+            script = ''
+              key=
+
+              read -r cmdline < /proc/cmdline
+              for param in $cmdline; do
+                case "$param" in
+                  microvm.builder-ssh-key=*)
+                    key="''${param#microvm.builder-ssh-key=}"
+                    break
+                    ;;
+                esac
+              done
+
+              if [ -z "$key" ]; then
+                echo "Missing microvm.builder-ssh-key kernel parameter" >&2
+                exit 1
+              fi
+
               install -d -m 0700 /root/.ssh
 
               if printf '%s\n' "$key" | ${lib.getExe' pkgs.coreutils "base64"} -d > /root/.ssh/authorized_keys.tmp; then
@@ -91,8 +160,16 @@
                 echo "Invalid microvm.builder-ssh-key kernel parameter" >&2
                 exit 1
               fi
-            fi
-          '';
+            '';
+          };
+
+          systemd.services.sshd.after = [
+            "microvm-builder-ssh-key.service"
+          ];
+
+          systemd.services.sshd.requires = [
+            "microvm-builder-ssh-key.service"
+          ];
 
           system.stateVersion = "26.11";
         };
@@ -276,17 +353,7 @@
         };
 
         launchd.daemons.${serviceName} = {
-          command = ''
-            ${microvmBuilder} daemon \
-              --runtime-dir ${lib.escapeShellArg cfg.runtime.directory} \
-              --gvproxy ${lib.escapeShellArg gvproxy} \
-              --vfkit ${lib.escapeShellArg vfkit} \
-              --runner ${lib.escapeShellArg microvmRunner} \
-              --ssh-port ${toString cfg.ssh.port} \
-              --idle-timeout ${toString cfg.idleTimeout} \
-              --start-timeout ${toString cfg.startTimeout} \
-              --stop-timeout ${toString cfg.stopTimeout}
-          '';
+          command = lib.getExe daemonWrapper;
 
           serviceConfig = {
             UserName = config.system.primaryUser;
@@ -336,28 +403,7 @@
             -g staff \
             ${lib.escapeShellArg (builtins.dirOf cfg.runtime.overlayImage)}
 
-          if [[ ! -s ${lib.escapeShellArg cfg.ssh.privateKey} ]]; then
-            ${lib.getExe' pkgs.openssh "ssh-keygen"} \
-              -t ed25519 \
-              -N "" \
-              -f ${lib.escapeShellArg cfg.ssh.privateKey} \
-              -C microvm-builder
-
-            chown ${lib.escapeShellArg config.system.primaryUser}:staff \
-              ${lib.escapeShellArg cfg.ssh.privateKey} \
-              ${lib.escapeShellArg cfg.ssh.privateKey}.pub
-          fi
-
-          if [[ ! -s ${lib.escapeShellArg cfg.ssh.publicKey} ]]; then
-            ${lib.getExe' pkgs.openssh "ssh-keygen"} \
-              -y \
-              -f ${lib.escapeShellArg cfg.ssh.privateKey} \
-              > ${lib.escapeShellArg cfg.ssh.publicKey}
-
-            chown ${lib.escapeShellArg config.system.primaryUser}:staff \
-              ${lib.escapeShellArg cfg.ssh.publicKey}
-            chmod 0644 ${lib.escapeShellArg cfg.ssh.publicKey}
-          fi
+          ${lib.getExe ensureSshKey}
         '';
       };
     };
