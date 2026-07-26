@@ -58,25 +58,44 @@
         };
       };
 
-      builderModule = {
-        networking.useDHCP = true;
+      builderModule =
+        { pkgs, ... }:
+        {
+          networking.useDHCP = true;
 
-        services.openssh = {
-          enable = true;
+          services.openssh = {
+            enable = true;
 
-          settings = {
-            PermitRootLogin = "prohibit-password";
-            PasswordAuthentication = false;
-            KbdInteractiveAuthentication = false;
+            settings = {
+              PermitRootLogin = "prohibit-password";
+              PasswordAuthentication = false;
+              KbdInteractiveAuthentication = false;
+            };
           };
+
+          system.activationScripts.microvmBuilderSshKey.text = ''
+            key="$(
+              ${lib.getExe' pkgs.gnused "sed"} \
+                -n 's/.* microvm.builder-ssh-key=\([^ ]*\).*/\1/p' \
+                /proc/cmdline
+            )"
+
+            if [ -n "$key" ]; then
+              install -d -m 0700 /root/.ssh
+
+              if printf '%s\n' "$key" | ${lib.getExe' pkgs.coreutils "base64"} -d > /root/.ssh/authorized_keys.tmp; then
+                mv /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+                chmod 0600 /root/.ssh/authorized_keys
+              else
+                rm -f /root/.ssh/authorized_keys.tmp
+                echo "Invalid microvm.builder-ssh-key kernel parameter" >&2
+                exit 1
+              fi
+            fi
+          '';
+
+          system.stateVersion = "26.11";
         };
-
-        users.users.root.openssh.authorizedKeys.keyFiles = [
-          cfg.ssh.publicKey
-        ];
-
-        system.stateVersion = "26.11";
-      };
 
       microvmNixos = inputs.nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
@@ -131,16 +150,10 @@
             description = "Host TCP port forwarded to SSH in the builder VM.";
           };
 
-          sourcePrivateKey = lib.mkOption {
-            type = lib.types.path;
-            default = ../keys/id_builder;
-            description = "Private SSH key stored in the repository.";
-          };
-
           publicKey = lib.mkOption {
-            type = lib.types.path;
-            default = ../keys/id_builder.pub;
-            description = "Public SSH key authorized inside the builder VM.";
+            type = lib.types.str;
+            default = "${cfg.runtime.directory}/id_builder.pub";
+            description = "Persistent runtime public SSH key authorized inside the builder VM.";
           };
 
           privateKey = lib.mkOption {
@@ -158,7 +171,7 @@
 
         speedFactor = lib.mkOption {
           type = lib.types.ints.positive;
-          default = 1;
+          default = 2;
           description = "Relative Nix scheduling preference for this builder.";
         };
 
@@ -213,7 +226,7 @@
         runtime = {
           directory = lib.mkOption {
             type = lib.types.str;
-            default = "/Users/${config.system.primaryUser}/Library/Application Support/microvm-builder";
+            default = "/Users/${config.system.primaryUser}/.local/state/microvm-builder";
             description = "Runtime directory containing daemon.sock and vfkit.sock.";
           };
 
@@ -312,21 +325,39 @@
 
         system.activationScripts.preActivation.text = ''
           install -d \
+            -m 0700 \
             -o ${lib.escapeShellArg config.system.primaryUser} \
             -g staff \
             ${lib.escapeShellArg cfg.runtime.directory}
 
           install -d \
+            -m 0700 \
             -o ${lib.escapeShellArg config.system.primaryUser} \
             -g staff \
             ${lib.escapeShellArg (builtins.dirOf cfg.runtime.overlayImage)}
 
-          install \
-            -m 0600 \
-            -o ${lib.escapeShellArg config.system.primaryUser} \
-            -g staff \
-            ${lib.escapeShellArg cfg.ssh.sourcePrivateKey} \
-            ${lib.escapeShellArg cfg.ssh.privateKey}
+          if [[ ! -s ${lib.escapeShellArg cfg.ssh.privateKey} ]]; then
+            ${lib.getExe' pkgs.openssh "ssh-keygen"} \
+              -t ed25519 \
+              -N "" \
+              -f ${lib.escapeShellArg cfg.ssh.privateKey} \
+              -C microvm-builder
+
+            chown ${lib.escapeShellArg config.system.primaryUser}:staff \
+              ${lib.escapeShellArg cfg.ssh.privateKey} \
+              ${lib.escapeShellArg cfg.ssh.privateKey}.pub
+          fi
+
+          if [[ ! -s ${lib.escapeShellArg cfg.ssh.publicKey} ]]; then
+            ${lib.getExe' pkgs.openssh "ssh-keygen"} \
+              -y \
+              -f ${lib.escapeShellArg cfg.ssh.privateKey} \
+              > ${lib.escapeShellArg cfg.ssh.publicKey}
+
+            chown ${lib.escapeShellArg config.system.primaryUser}:staff \
+              ${lib.escapeShellArg cfg.ssh.publicKey}
+            chmod 0644 ${lib.escapeShellArg cfg.ssh.publicKey}
+          fi
         '';
       };
     };
